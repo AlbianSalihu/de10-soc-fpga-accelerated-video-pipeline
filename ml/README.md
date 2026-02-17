@@ -2,6 +2,7 @@
 This part describe how the machine learning part works.
 
 ## Description of the folder structure:
+```
 ml
 ├─ Readme.md : The current file
 ├─ requirements.txt : All requirements to run the machine learning parts
@@ -32,3 +33,4 @@ ml
    │  └─ alexnet64gray.py
    └─ train:
       └─ train.py 
+```
