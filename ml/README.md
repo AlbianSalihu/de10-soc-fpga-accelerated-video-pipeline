@@ -147,7 +147,9 @@ This step produces:
 ### Weight Quantization
 Per-output-channel symmetric:
 $$
-s_y[c] = \dfrac{max|w[c]|}{127} \\
+s_y[c] = \dfrac{max|w[c]|}{127}
+$$
+$$
 q_w[c] = round(\dfrac{w[c]}{s_w[c]})
 $$
 
@@ -173,7 +175,9 @@ $$
 
 Enabling pure integer inference:
 $$
-acc = \sum(q_x \times q_x) + q_b\\
+acc = \sum(q_x \times q_x) + q_b
+$$
+$$
 q_y = (acc \times m) >> r
 $$
 
