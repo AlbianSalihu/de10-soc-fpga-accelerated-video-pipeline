@@ -18,11 +18,14 @@ ml/outputs/
 !ml/outputs/exported/
 
 # Quartus generated folders
-hardware/Quartus/db/
-Quartus/**/incremental_db/
-Quartus/**/greybox_tmp/
-Quartus/**/qdb/
-Quartus/**/hc_output/
+hardware/Quartus/**/db/
+hardware/Quartus/**/incremental_db/
+hardware/Quartus/**/greybox_tmp/
+hardware/Quartus/**/qdb/
+hardware/Quartus/**/hc_output/
+hardware/Quartus/**/output_files/
+hardware/Quartus/**/simulation/
+
 
 # Compilation outputs
 quartus/**/output_files/
