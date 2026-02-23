@@ -18,8 +18,27 @@ ml/outputs/
 !ml/outputs/exported/
 
 # Quartus generated folders
-Quartus/**/db/
+hardware/Quartus/db/
 Quartus/**/incremental_db/
 Quartus/**/greybox_tmp/
 Quartus/**/qdb/
 Quartus/**/hc_output/
+
+# Compilation outputs
+quartus/**/output_files/
+*.sof
+*.pof
+*.jic
+*.rbf
+*.rpt
+*.summary
+*.smsg
+*.done
+*.qws
+*.log
+
+# Simulation junk
+quartus/**/simulation/
+transcript
+*.wlf
+
