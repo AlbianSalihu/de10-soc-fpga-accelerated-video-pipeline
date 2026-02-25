@@ -1,7 +1,7 @@
-# DE10-SoC FPGA-Accelerated Video Pipeline
+# DE1-SoC FPGA-Accelerated Video Pipeline
 
 ## Overview
-This repository is a hardware-oriented edge inference project targeting the Intel DE10-SoC (ARM + FPGA). The end goal is to run a compact CNN using a fully integer-only inference datapath on FPGA, with a verification workflow that ensures the hardware implementation matches a trusted Python reference.
+This repository is a hardware-oriented edge inference project targeting the Intel DE1-SoC (ARM + FPGA). The end goal is to run a compact CNN using a fully integer-only inference datapath on FPGA, with a verification workflow that ensures the hardware implementation matches a trusted Python reference.
 
 What’s already implemented today:
 - A minimal but complete ML + quantization + export pipeline in PyTorch (binary parameter export to .bin format pending)
