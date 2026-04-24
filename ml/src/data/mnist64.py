@@ -15,7 +15,6 @@ class MNIST64Config:
     image_size: int = 64
     batch_size: int = 128
     num_workers: int = 2
-    pin_memory: bool = True
     persistent_workers: bool = True
     val_ratio: float = 0.1
     seed: int = 1234
@@ -105,36 +104,37 @@ def get_dataloaders(cfg: MNIST64Config)->Tuple[DataLoader, DataLoader, DataLoade
 
     train_ds, val_ds, test_ds = get_datasets(cfg)
 
-    persistent = cfg.persistent_workers and cfg.num_workers>0
+    pin_memory  = torch.cuda.is_available()
+    persistent  = cfg.persistent_workers and cfg.num_workers > 0
 
     train_loader = DataLoader(
-        train_ds, 
-        batch_size = cfg.batch_size,
-        shuffle = True, 
-        num_workers = cfg.num_workers,
-        pin_memory = cfg.pin_memory,
+        train_ds,
+        batch_size         = cfg.batch_size,
+        shuffle            = True,
+        num_workers        = cfg.num_workers,
+        pin_memory         = pin_memory,
         persistent_workers = persistent,
-        drop_last = False,
+        drop_last          = False,
     )
 
     val_loader = DataLoader(
         val_ds,
-        batch_size = cfg.batch_size,
-        shuffle = False, 
-        num_workers = cfg.num_workers,
-        pin_memory = cfg.pin_memory,
+        batch_size         = cfg.batch_size,
+        shuffle            = False,
+        num_workers        = cfg.num_workers,
+        pin_memory         = pin_memory,
         persistent_workers = persistent,
-        drop_last = False,
+        drop_last          = False,
     )
 
     test_loader = DataLoader(
         test_ds,
-        batch_size = cfg.batch_size,
-        shuffle = False, 
-        num_workers = cfg.num_workers,
-        pin_memory = cfg.pin_memory,
+        batch_size         = cfg.batch_size,
+        shuffle            = False,
+        num_workers        = cfg.num_workers,
+        pin_memory         = pin_memory,
         persistent_workers = persistent,
-        drop_last = False,
+        drop_last          = False,
     )
 
     return train_loader, val_loader, test_loader

@@ -46,6 +46,20 @@ ml
       └─ train.py
 ```
 
+## Pipeline Runner
+Script: [run_pipeline.py](scripts/run_pipeline.py)
+
+Runs the full pipeline end-to-end from a single config file:
+```bash
+python -m ml.scripts.run_pipeline --config ml/config/default.yaml --device cuda
+```
+Individual steps can be skipped with `--skip-train`, `--skip-calibrate`, `--skip-quantize`, `--skip-test`, `--skip-export`.
+Pin to a specific run with `--run-id N`.
+
+Config files live in [ml/config/](config/):
+- `default.yaml` — training and calibration hyperparameters
+- `fpga.yaml` — hardware constants (SDRAM threshold, binary format version)
+
 ## Dataset
 MNIST is resized from 28×28 to 64×64 grayscale.
 

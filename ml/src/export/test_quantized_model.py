@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from ml.src.data.mnist64 import MNIST64Config, get_dataloaders
 from ml.src.models.alexnet64gray import AlexNet64Gray
@@ -347,7 +348,7 @@ def evaluate_float(model: nn.Module, loader, device: torch.device) -> float:
     model.eval()
     correct = 0
     total = 0
-    for x, y in loader:
+    for x, y in tqdm(loader, desc="  float eval  ", unit="batch", leave=False):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
         logits = model(x)
@@ -362,13 +363,10 @@ def evaluate_quantized(model: AlexNet64Gray, qp: QParams, loader, device: torch.
     model.eval()
     correct = 0
     total = 0
-    for x, y in loader:
+    for x, y in tqdm(loader, desc="  quant eval  ", unit="batch", leave=False):
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-
-        # x is normalized float because your cfg.normalize is True (same as training)
         x0_q = quantize_input_from_normalized(x, s0=s0)  # int8
-
         logits = forward_quantized(model, qp, x0_q=x0_q)  # float64 logits
         pred = logits.argmax(dim=1)
         correct += (pred == y).sum().item()
@@ -506,33 +504,51 @@ def main() -> int:
     model.eval()
 
     # Load quant params
-    qp = QParams(
-        npz_path=npz_path,
-        meta_path=meta_path,
-        device=device,
-    )
+    qp = QParams(npz_path=npz_path, meta_path=meta_path, device=device)
 
     # Resolve s0: CLI arg takes priority, else read from the exported JSON
     if args.s0 is not None:
         s0 = float(args.s0)
     else:
         s0 = float(qp.meta["inputs"]["s0"])
-        print(f"[test_quantized_model] s0 read from {meta_path.name}: {s0}")
 
     if s0 <= 0.0:
         raise SystemExit(f"s0 must be > 0, got {s0}")
 
-    # Float accuracy (baseline)
+    n_layers = len(qp.meta["layers"])
+    n_test   = len(test_loader.dataset)
+
+    # -- Startup banner -------------------------------------------------------
+    sep = "─" * 62
+    print(f"\n{sep}")
+    print(f"  test_quantized_model  run{run_id}")
+    print(f"  device      : {device}")
+    print(f"  checkpoint  : {ckpt_path}")
+    print(f"  qparams npz : {npz_path}")
+    print(f"  qparams json: {meta_path}")
+    print(f"  s0          : {s0}  (first-layer input scale)")
+    print(f"  layers      : {n_layers}  test samples : {n_test:,}")
+    print(f"{sep}\n")
+
+    # -- Float accuracy (baseline) --------------------------------------------
+    print("  [1/3] Float model evaluation...")
     float_acc = evaluate_float(model, test_loader, device=device)
+    print(f"        → acc {float_acc * 100:.2f}%\n")
 
-    # Quantized accuracy (PTQ theoretical limit with normalized inputs)
+    # -- Quantized accuracy ---------------------------------------------------
+    print("  [2/3] Quantized PTQ evaluation...")
     q_acc = evaluate_quantized(model, qp, test_loader, device=device, s0=s0)
+    print(f"        → acc {q_acc * 100:.2f}%\n")
 
-    print(f"Float model test accuracy:     {float_acc * 100:.2f}%")
-    print(f"Quantized PTQ test accuracy:   {q_acc * 100:.2f}%")
-    print(f"Accuracy drop:                 {(float_acc - q_acc) * 100:.2f}%")
+    # -- Summary --------------------------------------------------------------
+    print(f"{sep}")
+    print(f"  Float accuracy    : {float_acc * 100:.2f}%")
+    print(f"  Quantized accuracy: {q_acc * 100:.2f}%")
+    print(f"  Accuracy drop     : {(float_acc - q_acc) * 100:+.2f}%")
+    print(f"{sep}\n")
 
-    # Per-layer error breakdown on one batch
+    # -- Per-layer error breakdown --------------------------------------------
+    print("  [3/3] Per-layer quantization error (one batch)...")
     x_sample, _ = next(iter(test_loader))
     x_sample = x_sample.to(device)
     _per_layer_error_report(model, qp, x_sample, device, s0)

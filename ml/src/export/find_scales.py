@@ -296,8 +296,6 @@ def main() -> int:
                 else outputs_base / f"run{run_id}" / "act_scales_sy.json"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[find_scales] run{run_id}  ckpt    → {ckpt_path}")
-    print(f"[find_scales] run{run_id}  output  → {out_path}")
 
     # -- Config ---------------------------------------------------------------
     cfg = MNIST64Config(
@@ -334,10 +332,23 @@ def main() -> int:
     )
 
     max_batches = None if args.max_batches == 0 else args.max_batches
-    total = max_batches if max_batches is not None else len(loader)
+    n_batches   = max_batches if max_batches is not None else len(loader)
+    n_samples   = n_batches * args.batch_size
+
+    # -- Startup banner -------------------------------------------------------
+    sep = "─" * 62
+    print(f"\n{sep}")
+    print(f"  find_scales  run{run_id}")
+    print(f"  device      : {device}")
+    print(f"  checkpoint  : {ckpt_path}")
+    print(f"  output      : {out_path}")
+    print(f"  split       : {args.split}  (~{n_samples:,} samples,  {n_batches} batches)")
+    print(f"  hook        : {args.hook}   percentile : {args.percentile * 100:.1f}%")
+    print(f"  hooked      : {len(handles)} modules")
+    print(f"{sep}\n")
 
     try:
-        for bi, batch in enumerate(tqdm(loader, total=total, desc="[find_scales] calibrating", unit="batch")):
+        for bi, batch in enumerate(tqdm(loader, total=n_batches, desc="  calibrating", unit="batch")):
             if max_batches is not None and bi >= max_batches:
                 break
             x, _y = batch
@@ -348,8 +359,9 @@ def main() -> int:
             h.remove()
 
     # Convert stats -> s_y:
-    #   - If hook == relu: post-ReLU => uint8 => s_y = P99.9(y) / 255
-    #   - If include_logits: logits scale is symmetric int8 => s_logits = P99.9(|z|) / 127
+    #   hook == relu  : post-ReLU => uint8  => s_y = P(y) / 255
+    #   hook == conv/linear (signed) => int8 => s   = P(|y|) / 127
+    #   include_logits: logits      => int8  => s   = P(|z|) / 127
     sy: Dict[str, float] = {}
     meta: Dict[str, Dict] = {}
 
@@ -379,6 +391,16 @@ def main() -> int:
             "kind": kind,
         }
 
+    # -- Scales table ---------------------------------------------------------
+    print(f"\n  {'Layer':<28} {'Kind':<24} {'P99.9':>10} {'max':>10} {'s_y':>12}")
+    print(f"  {'─' * 86}")
+    for name, m in meta.items():
+        print(
+            f"  {name:<28} {m['kind']:<24}"
+            f" {m['percentile_value']:>10.4f} {m['max_value']:>10.4f} {sy[name]:>12.6f}"
+        )
+    print()
+
     payload = {
         "calibration": {
             "split": args.split,
@@ -396,8 +418,7 @@ def main() -> int:
     }
 
     out_path.write_text(json.dumps(payload, indent=2))
-    print(f"[find_scales.py] Wrote activation scales to: {out_path}")
-    print(f"[find_scales.py] Collected {len(sy)} scale entries.")
+    print(f"  Written → {out_path}")
     return 0
 
 

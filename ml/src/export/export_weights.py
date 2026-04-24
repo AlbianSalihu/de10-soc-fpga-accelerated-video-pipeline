@@ -463,7 +463,9 @@ def main() -> int:
     out_path  = Path(args.out).expanduser().resolve()  if args.out  \
                 else outputs_base / f"run{run_id}" / "fpgaqparms.bin"
 
-    print(f"[export_weights] run{run_id}  output → {out_path}")
+    action = "Overwriting" if out_path.exists() else "Creating"
+    print(f"[export_weights] run{run_id}  {action} → {out_path}")
+    print(f"[export_weights] sdram threshold : {sdram_threshold // 1024} KB")
 
     # 1. load_inputs()
     layers, arrays = load_inputs(npz_path=npz_path, meta_path=meta_path)

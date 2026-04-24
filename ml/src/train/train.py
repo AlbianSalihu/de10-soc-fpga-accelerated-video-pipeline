@@ -28,14 +28,16 @@
 from __future__ import annotations
 
 import argparse
-import json 
+import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Tuple
 
-import torch 
+import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
 
 from ml.src.data.mnist64 import MNIST64Config, get_dataloaders
 from ml.src.models.alexnet64gray import AlexNet64Gray
@@ -102,6 +104,8 @@ def train_one_epoch(
         loss_fn: nn.Module,
         optimizer: optim.Optimizer,
         device: torch.device,
+        epoch: int,
+        total_epochs: int,
 ) -> Tuple[float, float]:
     """Train the model for one epoch over the training DataLoader.
 
@@ -111,6 +115,8 @@ def train_one_epoch(
         loss_fn (nn.Module): Loss function (CrossEntropyLoss)
         optimizer (optim.Optimizer): Optimizer (Adam)
         device (torch.device): device to run on (CPU or cuda)
+        epoch (int): current epoch number (1-based), used for tqdm label
+        total_epochs (int): total number of epochs, used for tqdm label
 
     Returns:
         Tuple[float, float]: (avg_loss, avg_accuracy) over the epoch
@@ -120,23 +126,32 @@ def train_one_epoch(
     total_correct = 0
     total_n = 0
 
-    for x,y in loader:
+    pbar = tqdm(
+        loader,
+        desc=f"  Epoch {epoch:02d}/{total_epochs} [train]",
+        unit="batch",
+        leave=False,
+    )
+    for x, y in pbar:
         x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
 
-        # Forward -> loss -> backward -> update
         logits = model(x)
         loss = loss_fn(logits, y)
         loss.backward()
         optimizer.step()
 
-        # Accumulate epoch stats
         bs = y.size(0)
-        total_loss += loss.item() * bs
-        total_correct += (logits.argmax(dim=1)==y).sum().item()
-        total_n += bs
+        total_loss   += loss.item() * bs
+        total_correct += (logits.argmax(dim=1) == y).sum().item()
+        total_n      += bs
+
+        pbar.set_postfix(
+            loss=f"{total_loss / total_n:.4f}",
+            acc=f"{total_correct / total_n * 100:.1f}%",
+        )
 
     return total_loss / total_n, total_correct / total_n
 
@@ -262,16 +277,29 @@ def main()->int:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[train] run{run_id}  checkpoints → {ckpt_dir}")
-    print(f"[train] run{run_id}  metadata    → {runs_dir}")
-
-    # Build dataloaders
+    # Build dataloaders first so we can print dataset sizes in the banner
     train_loader, val_loader, test_loader = get_dataloaders(cfg)
 
-    model = AlexNet64Gray(num_classes=10).to(device)
-
+    model     = AlexNet64Gray(num_classes=10).to(device)
     loss_fn   = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    n_train  = len(train_loader.dataset)
+    n_val    = len(val_loader.dataset)
+    n_test   = len(test_loader.dataset)
+
+    # -- Startup banner -------------------------------------------------------
+    sep = "─" * 62
+    print(f"\n{sep}")
+    print(f"  run{run_id}  AlexNet64Gray  —  {n_params:,} parameters")
+    print(f"  device      : {device}")
+    print(f"  dataset     : train {n_train:,}  val {n_val:,}  test {n_test:,}")
+    print(f"  epochs      : {args.epochs}  batch {args.batch_size}  lr {args.lr}  wd {args.weight_decay}")
+    print(f"  augment     : {args.augment}  normalize : {not args.no_normalize}  seed : {args.seed}")
+    print(f"  checkpoints : {ckpt_dir}")
+    print(f"  metadata    : {runs_dir}")
+    print(f"{sep}\n")
 
     run_meta = {
         "run_id": run_id,
@@ -283,49 +311,65 @@ def main()->int:
 
     best_val_acc = -1.0
     best_epoch   = -1
+    t_train_start = time.time()
 
     for epoch in range(1, args.epochs + 1):
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
+        t_epoch = time.time()
+
+        tr_loss, tr_acc = train_one_epoch(
+            model, train_loader, loss_fn, optimizer, device,
+            epoch=epoch, total_epochs=args.epochs,
+        )
         val_loss, val_acc = evaluate(model, val_loader, loss_fn, device)
 
+        elapsed = time.time() - t_epoch
+        is_best = val_acc > best_val_acc
+        marker  = "  ★ new best" if is_best else ""
+
         print(
-            f"Epoch {epoch:02d}/{args.epochs} |"
-            f"train loss {tr_loss:.4f} acc {tr_acc*100:.2f}% |"
-            f"val loss {val_loss:.4f} acc {val_acc*100:.2f}% |"
+            f"  Epoch {epoch:02d}/{args.epochs}"
+            f"  │  train  loss {tr_loss:.4f}  acc {tr_acc * 100:5.2f}%"
+            f"  │  val    loss {val_loss:.4f}  acc {val_acc * 100:5.2f}%"
+            f"  │  {elapsed:.1f}s{marker}"
         )
 
         save_checkpoint(
-            out_dir=ckpt_dir,
-            model=model,
-            optimizer=optimizer,
-            epoch=epoch,
-            best_val_acc=best_val_acc,
-            cfg=cfg,
-            extra={"train_loss": tr_loss, "train_acc": tr_acc, "val_loss": val_loss, "val_acc": val_acc},
+            out_dir=ckpt_dir, model=model, optimizer=optimizer,
+            epoch=epoch, best_val_acc=best_val_acc, cfg=cfg,
+            extra={"train_loss": tr_loss, "train_acc": tr_acc,
+                   "val_loss": val_loss, "val_acc": val_acc},
             filename="last.pth",
         )
 
-        if val_acc > best_val_acc:
+        if is_best:
             best_val_acc = val_acc
             best_epoch   = epoch
             save_checkpoint(
-                out_dir=ckpt_dir,
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                best_val_acc=best_val_acc,
-                cfg=cfg,
-                extra={"train_loss": tr_loss, "train_acc": tr_acc, "val_loss": val_loss, "val_acc": val_acc},
+                out_dir=ckpt_dir, model=model, optimizer=optimizer,
+                epoch=epoch, best_val_acc=best_val_acc, cfg=cfg,
+                extra={"train_loss": tr_loss, "train_acc": tr_acc,
+                       "val_loss": val_loss, "val_acc": val_acc},
                 filename="best.pth",
             )
+
+    # -- Final evaluation on test set -----------------------------------------
+    print(f"\n{sep}")
+    print(f"  Training complete  ({time.time() - t_train_start:.1f}s)")
+    print(f"  Best val acc : {best_val_acc * 100:.2f}%  (epoch {best_epoch})")
+    print(f"{sep}")
+    print(f"  Loading best checkpoint → {ckpt_dir / 'best.pth'}")
 
     best_path = ckpt_dir / "best.pth"
     if best_path.exists():
         ckpt = torch.load(best_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
 
+    print(f"  Evaluating on test set...")
     te_loss, te_acc = evaluate(model, test_loader, loss_fn, device)
-    print(f"Test loss {te_loss:.4f} acc {te_acc*100:.2f}% | best val acc {best_val_acc*100:.2f}% (epoch {best_epoch})")
+
+    print(f"\n  Test  loss {te_loss:.4f}  acc {te_acc * 100:.2f}%")
+    print(f"  Acc drop vs best val : {(best_val_acc - te_acc) * 100:+.2f}%")
+    print(f"{sep}\n")
 
     report = {
         "best_epoch": best_epoch,

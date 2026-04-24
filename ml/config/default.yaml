@@ -6,7 +6,7 @@
 # Training  (train.py)
 # -----------------------------------------------------------------------
 train:
-  epochs: 10
+  epochs: 1
   batch_size: 128
   lr: 1.0e-3
   weight_decay: 0.0

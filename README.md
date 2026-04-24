@@ -58,6 +58,19 @@ The architecture was selected to:
 
 ## End-to-End Flow
 
+### Option A — Run the full pipeline with one command
+```bash
+python -m ml.scripts.run_pipeline --config ml/config/default.yaml --device cuda
+```
+Edit `ml/config/default.yaml` to change hyperparameters. Individual steps can be skipped:
+```bash
+python -m ml.scripts.run_pipeline --run-id 0 --skip-train --skip-calibrate
+```
+
+---
+
+### Option B — Run each step manually
+
 ### 1. Download dataset
 ```bash
 python -m ml.scripts.download_mnist
