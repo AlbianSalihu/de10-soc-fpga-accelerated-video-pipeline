@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+import yaml
 
 from ml.src.utils import latest_run_id
 
@@ -86,13 +87,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Pack FPGA quantization parameters into a single .bin for HPS loading."
     )
-    p.add_argument("--outputs-dir", type=str, default="ml/outputs",  help="Base dir for export outputs")
-    p.add_argument("--run-id",      type=int, default=-1, help="Run ID to use (default: latest)")
+    p.add_argument("--outputs-dir",  type=str, default="ml/outputs", help="Base dir for export outputs")
+    p.add_argument("--run-id",       type=int, default=-1, help="Run ID to use (default: latest)")
     p.add_argument("--npz",  type=str, default="", help="Override .npz path (overrides --run-id)")
     p.add_argument("--meta", type=str, default="", help="Override .json path (overrides --run-id)")
     p.add_argument("--out",  type=str, default="", help="Override .bin output path (overrides --run-id)")
-    p.add_argument("--sdram-threshold", type=int, default=SDRAM_THRESHOLD_DEFAULT,
-                   help="W_q byte size above which placement defaults to SDRAM (default: 128 KB)")
+    p.add_argument("--fpga-config", type=str, default="ml/config/fpga.yaml",
+                   help="Path to FPGA hardware config YAML (default: ml/config/fpga.yaml)")
+    p.add_argument("--sdram-threshold", type=int, default=None,
+                   help="W_q byte size above which placement defaults to SDRAM. "
+                        "CLI wins over fpga.yaml, which wins over hard-coded default (128 KB).")
     return p.parse_args()
 
 
@@ -435,6 +439,19 @@ def main() -> int:
     """
     args = parse_args()
 
+    # -- Resolve sdram_threshold: CLI > fpga.yaml > hard-coded default --------
+    fpga_cfg_path = Path(args.fpga_config).expanduser().resolve()
+    fpga_cfg: Dict[str, Any] = {}
+    if fpga_cfg_path.exists():
+        fpga_cfg = yaml.safe_load(fpga_cfg_path.read_text()) or {}
+        print(f"[export_weights] fpga config  → {fpga_cfg_path}")
+
+    sdram_threshold: int = (
+        args.sdram_threshold
+        if args.sdram_threshold is not None
+        else fpga_cfg.get("placement", {}).get("sdram_threshold_bytes", SDRAM_THRESHOLD_DEFAULT)
+    )
+
     # -- Resolve run-id based paths -------------------------------------------
     outputs_base = Path(args.outputs_dir).expanduser().resolve()
     run_id       = args.run_id if args.run_id >= 0 else latest_run_id(outputs_base)
@@ -455,7 +472,7 @@ def main() -> int:
     sections = build_section_list(
         layers          = layers,
         arrays          = arrays,
-        sdram_threshold = args.sdram_threshold,
+        sdram_threshold = sdram_threshold,
     )
 
     # 3. assign_file_offsets()

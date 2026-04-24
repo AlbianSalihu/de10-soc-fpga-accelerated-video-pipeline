@@ -1,0 +1,18 @@
+# FPGA hardware constraints for the DE1-SoC target.
+#
+# These values drive memory placement decisions in export_weights.py and must
+# stay consistent with the HPS C loader that reads the .bin file at runtime.
+# Edit here rather than in code when tuning for the hardware.
+
+placement:
+  # W_q arrays larger than this threshold are placed in FPGA SDRAM (IS42S16320F, 64 MB).
+  # Smaller arrays and all B_q / m / r go to on-chip BRAM (~700 KB available).
+  # 128 KB is a safe default: keeps small conv layers in BRAM, sends large FC layers to SDRAM.
+  sdram_threshold_bytes: 131072   # 128 * 1024
+
+  # All data sections in the blob are padded to this byte boundary.
+  data_alignment_bytes: 4
+
+binary_format:
+  # Bump this whenever the .bin section layout changes so the HPS loader can reject stale files.
+  version: 1

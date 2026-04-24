@@ -1,0 +1,39 @@
+# Default pipeline configuration.
+# Pass this to run_pipeline.py with: --config ml/config/default.yaml
+# All values here are overridable by CLI flags on run_pipeline.py.
+
+# -----------------------------------------------------------------------
+# Training  (train.py)
+# -----------------------------------------------------------------------
+train:
+  epochs: 10
+  batch_size: 128
+  lr: 1.0e-3
+  weight_decay: 0.0
+  seed: 1234
+  val_ratio: 0.1
+  augment: false
+
+# -----------------------------------------------------------------------
+# Activation calibration  (find_scales.py)
+# -----------------------------------------------------------------------
+calibration:
+  split: train          # which dataset split to run forward passes on
+  percentile: 0.999     # P99.9 of post-ReLU activations sets the uint8 range
+  hook: relu            # hook point: relu | conv | linear
+  sample_per_batch: 20000
+  max_batches: 0        # 0 = use full split
+
+# -----------------------------------------------------------------------
+# Weight quantization  (quantize_weights.py)
+# -----------------------------------------------------------------------
+quantization:
+  # First-layer input activation scale.
+  # Must match how the FPGA encodes the raw input image pixels.
+  # Typical value: (max_normalized_pixel) / 127  ~= 0.022
+  s0: 0.02
+
+# -----------------------------------------------------------------------
+# FPGA binary export  (export_weights.py)
+# -----------------------------------------------------------------------
+fpga_config: ml/config/fpga.yaml
