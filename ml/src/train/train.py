@@ -39,6 +39,7 @@ import torch.optim as optim
 
 from ml.src.data.mnist64 import MNIST64Config, get_dataloaders
 from ml.src.models.alexnet64gray import AlexNet64Gray
+from ml.src.utils import next_run_id, resolve_device
 
 def accuracy_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Compute top 1 accuracy for a batch from raw logits
@@ -207,13 +208,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _next_run_id(checkpoints_base: Path) -> int:
-    """Return the next available run ID by scanning checkpoints_base for existing runN folders."""
-    i = 0
-    while (checkpoints_base / f"run{i}").exists():
-        i += 1
-    return i
-
 def set_seed(seed: int) -> None:
     """Set RNG seeds for reproductibilty.
 
@@ -236,6 +230,14 @@ def main()->int:
         int: Failed or not. 0 if success
     """
     args = parse_args()
+
+    if args.epochs < 1:
+        raise SystemExit(f"--epochs must be >= 1, got {args.epochs}")
+    if args.batch_size < 1:
+        raise SystemExit(f"--batch-size must be >= 1, got {args.batch_size}")
+    if args.lr <= 0.0:
+        raise SystemExit(f"--lr must be > 0, got {args.lr}")
+
     set_seed(args.seed)
 
     cfg = MNIST64Config(
@@ -248,15 +250,12 @@ def main()->int:
         augment=args.augment,
     )
 
-    if args.device:
-        device=torch.device(args.device)
-    else:
-        device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     checkpoints_base = Path(args.checkpoints_dir).expanduser().resolve()
     runs_base        = Path(args.runs_dir).expanduser().resolve()
 
-    run_id  = args.run_id if args.run_id >= 0 else _next_run_id(checkpoints_base)
+    run_id  = args.run_id if args.run_id >= 0 else next_run_id(checkpoints_base)
     ckpt_dir = checkpoints_base / f"run{run_id}"
     runs_dir = runs_base        / f"run{run_id}"
 

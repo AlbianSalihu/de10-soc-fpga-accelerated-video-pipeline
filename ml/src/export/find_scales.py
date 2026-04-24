@@ -14,19 +14,11 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 from ml.src.data.mnist64 import MNIST64Config, get_dataloaders
 from ml.src.models.alexnet64gray import AlexNet64Gray
-
-
-def _latest_run_id(checkpoints_base: Path) -> int:
-    """Return the ID of the latest existing runN folder in checkpoints_base."""
-    i = 0
-    while (checkpoints_base / f"run{i}").exists():
-        i += 1
-    if i == 0:
-        raise RuntimeError(f"No runs found in {checkpoints_base}. Run train.py first.")
-    return i - 1
+from ml.src.utils import EPS, INT8_MAX, UINT8_MAX, latest_run_id, resolve_device
 
 class RunningTensorStats:
     """
@@ -287,12 +279,16 @@ def main() -> int:
         int: 0 on success
     """
     args = parse_args()
+
+    if not (0.0 < args.percentile < 1.0):
+        raise SystemExit(f"--percentile must be in (0, 1), got {args.percentile}")
+
     set_seed(args.seed)
 
     # -- Resolve run-id based paths -------------------------------------------
     checkpoints_base = Path(args.checkpoints_dir).expanduser().resolve()
     outputs_base     = Path(args.outputs_dir).expanduser().resolve()
-    run_id           = args.run_id if args.run_id >= 0 else _latest_run_id(checkpoints_base)
+    run_id           = args.run_id if args.run_id >= 0 else latest_run_id(checkpoints_base)
 
     ckpt_path = Path(args.ckpt).expanduser().resolve() if args.ckpt \
                 else checkpoints_base / f"run{run_id}" / "best.pth"
@@ -314,11 +310,7 @@ def main() -> int:
         augment=args.augment,
     )
 
-    # -- Device ---------------------------------------------------------------
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     # -- Data -----------------------------------------------------------------
     train_loader, val_loader, test_loader = get_dataloaders(cfg)
@@ -330,7 +322,7 @@ def main() -> int:
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
-    # Create stats dict and attach hooks 
+    # Create stats dict and attach hooks
     stats: Dict[str, RunningTensorStats] = {}
     handles = register_hooks(
         model=model,
@@ -342,18 +334,18 @@ def main() -> int:
     )
 
     max_batches = None if args.max_batches == 0 else args.max_batches
+    total = max_batches if max_batches is not None else len(loader)
 
-    # collect stats for max_batches 
-    for bi, batch in enumerate(loader):
-        if max_batches is not None and bi >= max_batches:
-            break
-        x, _y = batch
-        x = x.to(device, non_blocking=True)
-        _ = model(x)
-
-    # cleaning
-    for h in handles:
-        h.remove()
+    try:
+        for bi, batch in enumerate(tqdm(loader, total=total, desc="[find_scales] calibrating", unit="batch")):
+            if max_batches is not None and bi >= max_batches:
+                break
+            x, _y = batch
+            x = x.to(device, non_blocking=True)
+            _ = model(x)
+    finally:
+        for h in handles:
+            h.remove()
 
     # Convert stats -> s_y:
     #   - If hook == relu: post-ReLU => uint8 => s_y = P99.9(y) / 255
@@ -363,24 +355,21 @@ def main() -> int:
 
     for name, st in stats.items():
         p = st.percentile_value()
-        p = max(p, 1e-12)
+        p = max(p, EPS)
 
         if name.endswith("__logits"):
-            # symmetric int8 logits
-            s = p / 127.0
+            s = p / float(INT8_MAX)
             kind = "logits_symmetric_int8"
-            denom = 127
+            denom = INT8_MAX
         else:
             if args.hook == "relu":
-                # post-ReLU, non-negative => uint8
-                s = p / 255.0
+                s = p / float(UINT8_MAX)
                 kind = "post_relu_uint8"
-                denom = 255
+                denom = UINT8_MAX
             else:
-                # pre-ReLU signed tensors => symmetric int8
-                s = p / 127.0
+                s = p / float(INT8_MAX)
                 kind = "signed_symmetric_int8"
-                denom = 127
+                denom = INT8_MAX
 
         sy[name] = float(s)
         meta[name] = {

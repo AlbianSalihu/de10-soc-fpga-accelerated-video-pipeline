@@ -15,6 +15,10 @@ import torch.nn.functional as F
 
 from ml.src.data.mnist64 import MNIST64Config, get_dataloaders
 from ml.src.models.alexnet64gray import AlexNet64Gray
+from ml.src.utils import (
+    INT8_MAX, UINT8_MAX,
+    find_next_relu_name, latest_run_id, ordered_conv_linear_modules, resolve_device,
+)
 
 def clamp_int(x: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
     return torch.clamp(x, lo, hi)
@@ -82,7 +86,7 @@ def requant_u8_from_acc(
     prod = acc * m64  # int64
     # right shift with rounding
     out = rounding_right_shift(prod, r64)
-    out = clamp_int(out, 0, 255).to(torch.uint8)
+    out = clamp_int(out, 0, UINT8_MAX).to(torch.uint8)
     return out
 
 
@@ -207,13 +211,16 @@ def forward_quantized(
     model: AlexNet64Gray,
     qp: QParams,
     x0_q: torch.Tensor,
+    collect: dict | None = None,
 ) -> torch.Tensor:
     """Run quantized inference following the PQT design.
 
     Args:
-        model (AlexNet64Gray): Architecture instance 
-        qp (QParams): Quantization params loaded from export 
+        model (AlexNet64Gray): Architecture instance
+        qp (QParams): Quantization params loaded from export
         x0_q (torch.Tensor): Quantized input tensor int8 [N, 1, 64, 64]
+        collect: Optional dict populated with dequantized per-layer outputs keyed by
+                 conv/linear name; used by the per-layer error report.
 
     Returns:
         torch.Tensor: Float logits for argmax comparison
@@ -238,6 +245,10 @@ def forward_quantized(
             if m is None or r is None:
                 raise RuntimeError(f"Missing m/r for {name} (expected post-ReLU quantized layer).")
             x = requant_u8_from_acc(acc, m=m, r=r)  # uint8
+            if collect is not None:
+                s_y = qp.sy_for_layer(name)
+                if s_y is not None:
+                    collect[name] = x.float() * float(s_y)
 
         elif isinstance(mod, nn.ReLU):
             # Already applied ReLU in acc domain; skip
@@ -297,6 +308,10 @@ def forward_quantized(
             if m is None or r is None:
                 raise RuntimeError(f"Missing m/r for {name} (expected post-ReLU quantized layer).")
             x = requant_u8_from_acc(acc, m=m, r=r)  # uint8
+            if collect is not None:
+                s_y = qp.sy_for_layer(name)
+                if s_y is not None:
+                    collect[name] = x.float() * float(s_y)
             continue
 
         if isinstance(mod, nn.ReLU):
@@ -324,7 +339,7 @@ def quantize_input_from_normalized(x_norm: torch.Tensor, s0: float) -> torch.Ten
         torch.Tensor: int8 tensor
     """
     q = torch.round(x_norm / float(s0))
-    q = torch.clamp(q, -128, 127).to(torch.int8)
+    q = torch.clamp(q, -(INT8_MAX + 1), INT8_MAX).to(torch.int8)
     return q
 
 @torch.no_grad()
@@ -377,7 +392,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt", type=str,  default="", help="Override checkpoint path (overrides --run-id)")
     p.add_argument("--npz",  type=str,  default="", help="Override fpgaqparms.npz path (overrides --run-id)")
     p.add_argument("--meta", type=str,  default="", help="Override fpgaqparms.json path (overrides --run-id)")
-    p.add_argument("--s0", type=float, required=True, help="First-layer input scale used in export (same number).")
+    p.add_argument("--s0", type=float, default=None,
+                   help="First-layer input scale. If omitted, read from fpgaqparms.json.")
 
     p.add_argument("--device", type=str, default="", help="cpu or cuda; empty=auto")
     return p.parse_args()
@@ -390,14 +406,67 @@ def set_seed(seed: int) -> None:
 
 
 @torch.no_grad()
-def _latest_run_id(checkpoints_base: Path) -> int:
-    """Return the ID of the latest existing runN folder in checkpoints_base."""
-    i = 0
-    while (checkpoints_base / f"run{i}").exists():
-        i += 1
-    if i == 0:
-        raise RuntimeError(f"No runs found in {checkpoints_base}. Run train.py first.")
-    return i - 1
+def _per_layer_error_report(
+    model: AlexNet64Gray,
+    qp: QParams,
+    x: torch.Tensor,
+    device: torch.device,
+    s0: float,
+) -> None:
+    """Print a per-layer L1 error table comparing float vs dequantized quantized activations.
+
+    For each conv/linear layer that has a post-ReLU quantization point, runs both the float
+    model (hooks on nn.ReLU) and the quantized model (dequantized uint8 output) on a single
+    batch and reports mean absolute error.
+
+    Args:
+        model:  float AlexNet64Gray
+        qp:     loaded QParams
+        x:      one float input batch already on device (normalized)
+        device: torch.device
+        s0:     first-layer input scale
+    """
+    # Float: hook every ReLU, collect post-relu activations
+    float_post_relu: dict[str, torch.Tensor] = {}
+    handles = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.ReLU):
+            def _make(n: str):
+                def _h(_m, _i, out): float_post_relu[n] = out.detach().float()
+                return _h
+            handles.append(mod.register_forward_hook(_make(name)))
+    try:
+        model(x)
+    finally:
+        for h in handles:
+            h.remove()
+
+    # Quantized: collect dequantized per-layer outputs
+    quant_collect: dict[str, torch.Tensor] = {}
+    x0_q = quantize_input_from_normalized(x, s0)
+    forward_quantized(model, qp, x0_q, collect=quant_collect)
+
+    # Build conv/linear → relu name map for display
+    layers = ordered_conv_linear_modules(model)
+
+    print(f"\n[per-layer error]  float vs dequantized quantized (one batch, mean absolute error)")
+    print(f"  {'Layer':<20} {'Shape':<24} {'Float μ':>10} {'Quant μ':>10} {'L1 err':>10}")
+    print(f"  {'-'*76}")
+
+    for lname, _mod in layers:
+        relu_name = find_next_relu_name(model, lname)
+        if relu_name is None:
+            continue  # logits layer — no requant
+        f_act = float_post_relu.get(relu_name)
+        q_dq  = quant_collect.get(lname)
+        if f_act is None or q_dq is None:
+            continue
+        l1 = (f_act - q_dq).abs().mean().item()
+        print(
+            f"  {lname:<20} {str(tuple(f_act.shape)):<24}"
+            f" {f_act.mean().item():>10.4f} {q_dq.mean().item():>10.4f} {l1:>10.4f}"
+        )
+    print()
 
 
 def main() -> int:
@@ -407,7 +476,7 @@ def main() -> int:
     # -- Resolve run-id based paths -------------------------------------------
     checkpoints_base = Path(args.checkpoints_dir).expanduser().resolve()
     outputs_base     = Path(args.outputs_dir).expanduser().resolve()
-    run_id           = args.run_id if args.run_id >= 0 else _latest_run_id(checkpoints_base)
+    run_id           = args.run_id if args.run_id >= 0 else latest_run_id(checkpoints_base)
 
     ckpt_path  = Path(args.ckpt).expanduser().resolve()  if args.ckpt \
                  else checkpoints_base / f"run{run_id}" / "best.pth"
@@ -416,10 +485,7 @@ def main() -> int:
     meta_path  = Path(args.meta).expanduser().resolve()  if args.meta \
                  else outputs_base / f"run{run_id}" / "fpgaqparms.json"
 
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     cfg = MNIST64Config(
         data_dir=args.data_dir,
@@ -446,15 +512,31 @@ def main() -> int:
         device=device,
     )
 
+    # Resolve s0: CLI arg takes priority, else read from the exported JSON
+    if args.s0 is not None:
+        s0 = float(args.s0)
+    else:
+        s0 = float(qp.meta["inputs"]["s0"])
+        print(f"[test_quantized_model] s0 read from {meta_path.name}: {s0}")
+
+    if s0 <= 0.0:
+        raise SystemExit(f"s0 must be > 0, got {s0}")
+
     # Float accuracy (baseline)
     float_acc = evaluate_float(model, test_loader, device=device)
 
     # Quantized accuracy (PTQ theoretical limit with normalized inputs)
-    q_acc = evaluate_quantized(model, qp, test_loader, device=device, s0=float(args.s0))
+    q_acc = evaluate_quantized(model, qp, test_loader, device=device, s0=s0)
 
     print(f"Float model test accuracy:     {float_acc * 100:.2f}%")
     print(f"Quantized PTQ test accuracy:   {q_acc * 100:.2f}%")
     print(f"Accuracy drop:                 {(float_acc - q_acc) * 100:.2f}%")
+
+    # Per-layer error breakdown on one batch
+    x_sample, _ = next(iter(test_loader))
+    x_sample = x_sample.to(device)
+    _per_layer_error_report(model, qp, x_sample, device, s0)
+
     return 0
 
 

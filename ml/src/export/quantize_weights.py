@@ -29,16 +29,11 @@ import torch
 import torch.nn as nn
 
 from ml.src.models.alexnet64gray import AlexNet64Gray
+from ml.src.utils import (
+    EPS, INT8_MAX,
+    find_next_relu_name, latest_run_id, ordered_conv_linear_modules, resolve_device,
+)
 
-
-def _latest_run_id(checkpoints_base: Path) -> int:
-    """Return the ID of the latest existing runN folder in checkpoints_base."""
-    i = 0
-    while (checkpoints_base / f"run{i}").exists():
-        i += 1
-    if i == 0:
-        raise RuntimeError(f"No runs found in {checkpoints_base}. Run train.py first.")
-    return i - 1
 
 def quantize_M_to_mr(M: float)->Tuple[int, int]:
     """Convert positive float M into integer pair (m,r) such that:
@@ -79,7 +74,7 @@ def quantize_M_to_mr(M: float)->Tuple[int, int]:
     m = min(max(m,0),(1<<31)-1) 
     return m,r
 
-def per_out_channel_weight_scale(w: torch.Tensor, eps: float=1e-12) -> torch.Tensor:
+def per_out_channel_weight_scale(w: torch.Tensor, eps: float = EPS) -> torch.Tensor:
     """Compute per-output-channel symmetric scale for int8 weights:
         s_w[c] = max(abs(w[c]))/127
 
@@ -109,8 +104,8 @@ def per_out_channel_weight_scale(w: torch.Tensor, eps: float=1e-12) -> torch.Ten
     else:
         raise ValueError(f"Unsupported weight dimension {w.dim()} for per-channel scales")
     
-    a = torch.clamp(a, min=eps) # to avoid division by 0 later... 
-    return a / 127.0
+    a = torch.clamp(a, min=eps)
+    return a / float(INT8_MAX)
 
 def quantize_weights_int8(w: torch.Tensor, s_w: torch.Tensor)->torch.Tensor:
     """Quantize float weights to int8 per output channel: 
@@ -151,78 +146,6 @@ def quantize_bias_int32(b: torch.Tensor, s_x: float, s_w: torch.Tensor)->torch.T
     denom = (s_w*float(s_x)).to(b.device)
     q_b =torch.round(b/denom).to(torch.int32)
     return q_b
-
-def find_next_relu_name(model: nn.Module, layer_name: str, max_lookahead: int = 6)->Optional[str]:
-    """Find the next ReLU module following a given layer inside same nn.Sequential
-
-    Calibration stores activation output scales s_y keyed by (post-)ReLU module names.
-
-    This helper assumes the layer is inside an nn.Sequential (common in AlexNet-like models)
-    and scans forward a limited number of modules to find the next nn.ReLU.
-
-    This avoids hardcoding indices like features.1/features.4/etc.
-    Args:
-        model (nn.Module): The model to use
-        layer_name (str): The layer name (eg. "features.0")
-        max_lookahead (int, optional): How deep to search. Defaults to 6.
-
-    Returns:
-        Optional[str]: Modules names of the the next nn.ReLU or None 
-    """
-    # Ensures current layer has parent container
-    if "." not in layer_name:
-        return None
-    parent_name, child_key = layer_name.rsplit(".",1)
-
-    # Get the parent module
-    try:
-        parent = model.get_submodule(parent_name)
-    except AttributeError:
-        return None
-    
-    # Ensure parent is sequential
-    if not isinstance(parent, nn.Sequential):
-        return None
-    
-    keys = list(parent._modules.keys())
-
-    if child_key not in keys:
-        return None
-    
-    i0 = keys.index(child_key)
-    for j in range (i0+1, min(i0+1+max_lookahead, len(keys))):
-        k = keys[j]
-        mod = parent._modules[k]
-        if isinstance(mod, nn.ReLU):
-            return f"{parent_name}.{k}"
-        #stop early if we hit another "computational" layer (conv/linear) before relu
-        if isinstance(mod, (nn.Conv2d, nn.Linear)):
-            break
-
-    return None
-
-def ordered_conv_linear_modules(model: nn.Module)->List[Tuple[str, nn.Module]]:
-    """Collect Conv2d and Linear modules in a forward-ish order.
-
-    Iterates over model.named_modules() and returns a list of (name, module) pairs for all nn.Conv2d 
-    and nn.Linear layers.
-    
-    Note:
-        For models with branching/skip connections, named_modules() order is not guaranteed
-        to match true runtime execution order.
-
-    Args:
-        model: The PyTorch model to inspect.
-
-    Returns:
-        A list of (layer_name, layer_module) tuples for Conv2d and Linear layers.
-    """
-
-    out: List[Tuple[str, nn.Module]] = []
-    for name, mod in model.named_modules():
-        if isinstance(mod, (nn.Conv2d, nn.Linear)):
-            out.append((name,mod))
-    return out
 
 def parse_args()->argparse.Namespace:
     """Parse command-line arguments for the quantization export script.
@@ -281,10 +204,13 @@ def main() -> int:
     """
     args = parse_args()
 
+    if args.s0 <= 0.0:
+        raise SystemExit(f"--s0 must be > 0, got {args.s0}")
+
     # -- Resolve run-id based paths -------------------------------------------
     checkpoints_base = Path(args.checkpoints_dir).expanduser().resolve()
     outputs_base     = Path(args.outputs_dir).expanduser().resolve()
-    run_id           = args.run_id if args.run_id >= 0 else _latest_run_id(checkpoints_base)
+    run_id           = args.run_id if args.run_id >= 0 else latest_run_id(checkpoints_base)
 
     ckpt_path  = Path(args.ckpt).expanduser().resolve() if args.ckpt \
                  else checkpoints_base / f"run{run_id}" / "best.pth"
@@ -298,10 +224,7 @@ def main() -> int:
     print(f"[quantize_weights] run{run_id}  scales → {sy_path}")
     print(f"[quantize_weights] run{run_id}  output → {out_prefix}.(npz|json)")
 
-    if args.device:
-        device = torch.device(args.device)
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     # Load calibration JSON produced by find_scales.py
     sy_payload = json.loads(sy_path.read_text())

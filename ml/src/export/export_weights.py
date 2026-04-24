@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import zlib
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -44,15 +45,10 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
+from ml.src.utils import latest_run_id
 
-def _latest_run_id(outputs_base: Path) -> int:
-    """Return the ID of the latest existing runN folder in outputs_base."""
-    i = 0
-    while (outputs_base / f"run{i}").exists():
-        i += 1
-    if i == 0:
-        raise RuntimeError(f"No runs found in {outputs_base}. Run find_scales + quantize_weights first.")
-    return i - 1
+# W_q byte size above which placement defaults to SDRAM
+SDRAM_THRESHOLD_DEFAULT = 128 * 1024
 
 
 # -- Section definitions -------------------------------------------------------
@@ -95,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--npz",  type=str, default="", help="Override .npz path (overrides --run-id)")
     p.add_argument("--meta", type=str, default="", help="Override .json path (overrides --run-id)")
     p.add_argument("--out",  type=str, default="", help="Override .bin output path (overrides --run-id)")
-    p.add_argument("--sdram-threshold", type=int, default=128 * 1024,
+    p.add_argument("--sdram-threshold", type=int, default=SDRAM_THRESHOLD_DEFAULT,
                    help="W_q byte size above which placement defaults to SDRAM (default: 128 KB)")
     return p.parse_args()
 
@@ -330,13 +326,23 @@ def write_bin(sections: List[Section], out_path: Path) -> None:
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Pre-build blob to compute CRC32 before writing the header
+    blob_parts = []
+    for sec in sections:
+        raw = _to_le_bytes(sec.arr)
+        pad = _align_up(len(raw), 4) - len(raw)
+        blob_parts.append(raw + b"\x00" * pad)
+    blob = b"".join(blob_parts)
+    crc32 = zlib.crc32(blob) & 0xFFFFFFFF
+
     with out_path.open("wb") as f:
 
         # -- Header (16 bytes) -------------------------------------------------
+        # magic(4) version(4) num_sections(4) crc32_of_blob(4)
         f.write(MAGIC)
         f.write(struct.pack("<I", VERSION))
         f.write(struct.pack("<I", len(sections)))
-        f.write(struct.pack("<I", 0))  # reserved
+        f.write(struct.pack("<I", crc32))
 
         # -- Section table -----------------------------------------------------
         for sec in sections:
@@ -356,12 +362,7 @@ def write_bin(sections: List[Section], out_path: Path) -> None:
             ))
 
         # -- Data blob ---------------------------------------------------------
-        for sec in sections:
-            raw = _to_le_bytes(sec.arr)
-            f.write(raw)
-            pad = _align_up(len(raw), 4) - len(raw)
-            if pad:
-                f.write(b"\x00" * pad)
+        f.write(blob)
 
 
 _PARAM_NAMES  = {ParamType.Wq: "W_q", ParamType.Bq: "B_q", ParamType.m: "m", ParamType.r: "r"}
@@ -436,7 +437,7 @@ def main() -> int:
 
     # -- Resolve run-id based paths -------------------------------------------
     outputs_base = Path(args.outputs_dir).expanduser().resolve()
-    run_id       = args.run_id if args.run_id >= 0 else _latest_run_id(outputs_base)
+    run_id       = args.run_id if args.run_id >= 0 else latest_run_id(outputs_base)
 
     npz_path  = Path(args.npz).expanduser().resolve()  if args.npz  \
                 else outputs_base / f"run{run_id}" / "fpgaqparms.npz"
